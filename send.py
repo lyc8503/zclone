@@ -18,7 +18,6 @@ def zfs_full_send_compressed_and_encrypted(pool_name: str, chunk_size=1024*1024*
     assert isinstance(pool_name, str), "Pool name must be a string"
     assert all([c in (string.ascii_letters + string.digits + "._-@/") for c in pool_name]), "Pool name contains invalid characters"
 
-    pv = ""
     if progress:
         process = subprocess.Popen(f"zfs send -nRP {pool_name}", shell=True, stdout=subprocess.PIPE)
         size = 0
@@ -28,9 +27,17 @@ def zfs_full_send_compressed_and_encrypted(pool_name: str, chunk_size=1024*1024*
             if line.startswith("size"):
                 size = int(line.split()[1])
                 print(f"Total size: {format(size / 1024 / 1024, '.1f')} MiB")
-        pv = f" | pv -F '%b %t %r %a %p %e\n' --size {size}"
+        pv = f"pv -F '%b %t %r %a %p %e\n' --size {size}"
 
-    process = subprocess.Popen(f"zfs send -R {pool_name}{pv} | zstd | gpg --batch --passphrase {shlex.quote(ENCRYPTION_KEY)} -v --cipher-algo AES256 --s2k-mode 3 --s2k-digest-algo SHA512 --s2k-count 65600000 -z 0 --symmetric", shell=True, stdout=subprocess.PIPE)
+    command_pipeline = [
+        f"zfs send -R {pool_name}",
+        *([pv] if progress else []),
+        "zstd",
+        f"gpg --batch --passphrase {shlex.quote(ENCRYPTION_KEY)} -v --cipher-algo AES256 --s2k-mode 3 --s2k-digest-algo SHA512 --s2k-count 65011712 -z 0 --symmetric"
+    ]
+
+    command = " | ".join(command_pipeline)
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
 
     while True:
         data = process.stdout.read(chunk_size)
@@ -40,9 +47,10 @@ def zfs_full_send_compressed_and_encrypted(pool_name: str, chunk_size=1024*1024*
 
 
 def upload_block(data, filename):
-    # TODO: no local cache
-    # TODO: custom log level
-    process = subprocess.Popen(f"./rclone rcat --log-level ERROR {REMOTE_PATH}{filename}", shell=True, stdin=subprocess.PIPE)
+    # Rclone does not write any local files when streaming is supported on the remote end.
+    # If the remote does not support streaming, it is necessary to mount tmpfs to /tmp to prevent SSD wear.
+    # By default, rclone retries 3 times.
+    process = subprocess.Popen(f"./rclone rcat {REMOTE_PATH}{filename}", shell=True, stdin=subprocess.PIPE)
     process.stdin.write(data)
     process.stdin.close()
 
@@ -63,7 +71,7 @@ with ThreadPoolExecutor(max_workers=PARALLEL_UPLOAD_COUNT) as executor:
         if len(futures) >= PARALLEL_UPLOAD_COUNT:
             completed, futures = wait(futures, return_when='FIRST_COMPLETED')
 
-        print(f"Uploading file block {index}")
+        print(f"Uploading file block {index}, size {len(block)}")
         futures.add(executor.submit(upload_block, block, filename))
         
     wait(futures)
@@ -73,3 +81,4 @@ with ThreadPoolExecutor(max_workers=PARALLEL_UPLOAD_COUNT) as executor:
 
 #TODO: cli args, zfs recv, zfs verify, incremental send, error handling (retry, resume, etc.)
 #TODO: parity check?
+#TODO: shlex.quote
