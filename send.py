@@ -3,14 +3,18 @@ import subprocess
 import shlex
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
+from getpass import getpass
+import sys
 
 
 ### CONFIG
-ENCRYPTION_KEY = os.environ['KEY']
+ENCRYPTION_KEY = getpass("Encryption key: ")
 DATASET = os.environ['DATASET']
 REMOTE_PATH = os.environ['REMOTE']
 
 PARALLEL_UPLOAD_COUNT = 4
+
+RCLONE_RETRY = 9999
 
 
 def zfs_full_send_compressed_and_encrypted(pool_name: str, chunk_size=1024*1024*1024, progress=True):
@@ -47,16 +51,26 @@ def zfs_full_send_compressed_and_encrypted(pool_name: str, chunk_size=1024*1024*
 
 
 def upload_block(data, filename):
-    # Rclone does not write any local files when streaming is supported on the remote end.
-    # If the remote does not support streaming, it is necessary to mount tmpfs to /tmp to prevent SSD wear.
-    # By default, rclone retries 3 times.
-    process = subprocess.Popen(f"./rclone rcat {REMOTE_PATH}{filename}", shell=True, stdin=subprocess.PIPE)
-    process.stdin.write(data)
-    process.stdin.close()
+    counter = 0
+    while True:
+        # Rclone does not write any local files when streaming is supported on the remote end.
+        # If the remote does not support streaming, it is necessary to mount tmpfs to /tmp to prevent SSD wear.
+        # By default, rclone retries 3 times.
+        process = subprocess.Popen(f"./rclone rcat {REMOTE_PATH}{filename}", shell=True, stdin=subprocess.PIPE)
+        process.stdin.write(data)
+        process.stdin.close()
 
-    ret = process.wait()
-    assert ret == 0, f"Failed to upload {filename}, code {ret}"
-    print(f"Uploaded {filename}")
+        ret = process.wait()
+
+        if ret != 0:
+            print(f"Failed to upload {filename}, code {ret}, Retry {counter}")
+            counter += 1
+            if counter > RCLONE_RETRY:
+                print("Retry limit reached")
+                sys.exit(-1)
+        else:
+            print(f"Uploaded {filename}")
+            break
 
 
 futures = set()
