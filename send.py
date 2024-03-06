@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, wait
 from getpass import getpass
 import sys
+import traceback
 
 
 ### CONFIG
@@ -52,25 +53,27 @@ def zfs_full_send_compressed_and_encrypted(pool_name: str, chunk_size=1024*1024*
 
 def upload_block(data, filename):
     counter = 0
-    while True:
-        # Rclone does not write any local files when streaming is supported on the remote end.
-        # If the remote does not support streaming, it is necessary to mount tmpfs to /tmp to prevent SSD wear.
-        # By default, rclone retries 3 times.
-        process = subprocess.Popen(f"./rclone rcat {REMOTE_PATH}{filename}", shell=True, stdin=subprocess.PIPE)
-        process.stdin.write(data)
-        process.stdin.close()
+    try:
+        while True:
+            # Rclone does not write any local files when streaming is supported on the remote end.
+            # If the remote does not support streaming, it is necessary to mount tmpfs to /tmp to prevent SSD wear.
+            # By default, rclone retries 3 times.
+            process = subprocess.Popen(f"./rclone rcat {REMOTE_PATH}{filename}", shell=True, stdin=subprocess.PIPE)
+            process.communicate(data)
 
-        ret = process.wait()
-
-        if ret != 0:
-            print(f"Failed to upload {filename}, code {ret}, Retry {counter}")
-            counter += 1
-            if counter > RCLONE_RETRY:
-                print("Retry limit reached")
-                sys.exit(-1)
-        else:
-            print(f"Uploaded {filename}")
-            break
+            if process.returncode != 0:
+                counter += 1
+                print(f"Failed to upload {filename}, code {process.returncode}, Retry {counter}")
+                if counter > RCLONE_RETRY:
+                    print("Retry limit reached")
+                    sys.exit(-1)
+            else:
+                print(f"Uploaded {filename}")
+                break
+    except Exception:
+        # Unknown error
+        traceback.print_exc()
+        sys.exit(-1)
 
 
 futures = set()
